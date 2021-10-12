@@ -1,0 +1,518 @@
+# include "stm32f407xx.h"
+
+long Datasend;
+
+#define HIGH_LEVEL GPIOD->BSRR = 0x20001000;
+#define LOW_LEVEL GPIOD->BSRR |= 0x10002000;
+#define ZERO_LEVEL GPIOD->BSRR |=0x30000000;
+
+#define START_TIM10 TIM10->CR1 |= TIM_CR1_CEN; // start the timer 
+int i;
+int k;
+int l=0;
+int t = 0;
+int amount_of_bits_in_buffer = 0;
+
+// CommandWord variebles
+int adress_OU = 5;
+int priem_peredacha = 1;
+int podadres = 14;
+int cod_command = 2;
+int amount_of_words = 1;
+
+// DataWord variebles 
+int Data_to_tranceive;
+
+uint8_t data1[20]; // nado zdelat chastnoy
+
+//long int DMA_BUFFER[1281];
+long int DMA_BUFFER[200];
+int k = 0 ;
+int STOP_TRANSEIVE_FLAG=0; // if 0 transeiver works
+//long int data[32];
+// rcc config 
+
+void SysClockConfig (void)
+{
+/* STEPS:
+1. ENABLE HSE and wait for the HSE to become ready 
+2. Set the power enable clock and voltage regulator
+3. Configure the flash prefetch and the latency related settings 
+4. Configure the prescalars HCLK, PCLK1, PCLK2
+5. Configure the main PLL
+6. Enable the PLL and wait for it to become ready 
+7. Select the Clock Source and wait for it to be set 
+*/
+
+#define PLL_M 8
+#define PLL_N 336
+#define PLL_P 0 // PLLP = 2
+	
+//1. ENABLE HSE and wait for the HSE to become ready 
+	RCC->CR |= RCC_CR_HSEON;
+	while (!(RCC->CR & RCC_CR_HSERDY));
+	
+//2. Set the power enable clock and voltage regulator
+	RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+	PWR->CR |= PWR_CR_VOS;
+	
+//3. Configure the flash prefetch and the latency related settings 
+	FLASH->ACR = FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN | FLASH_ACR_LATENCY_5WS;
+	
+//4. Configure the prescalars HCLK, PCLK1, PCLK2
+// AHB PR
+	RCC->CFGR |= RCC_CFGR_HPRE_DIV1;
+
+//APB1 PR
+	RCC->CFGR |= RCC_CFGR_PPRE1_DIV4;
+
+//APB2 PR
+	RCC->CFGR |= RCC_CFGR_PPRE2_DIV2;
+
+//5. Configure the main PLL
+	RCC->PLLCFGR = (PLL_M<<0) | (PLL_N<<6) | (PLL_P<<16) | (RCC_PLLCFGR_PLLSRC_HSE);
+
+//6. Enable the PLL and wait for it to become ready 
+	RCC->CR |= RCC_CR_PLLON;
+	while (!(RCC->CR & RCC_CR_PLLRDY))
+		
+//7. Select the Clock Source and wait for it to be set 
+	RCC->CFGR |= RCC_CFGR_SW_PLL;
+	while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
+	
+}
+
+
+
+void TIM9Config (void) // TIMER 9 for Delays in us and ms
+{
+	/*
+	STEPS
+	1. Enable Timer Clock
+	2. Set the prescalor and ARR
+	3. Enable the Timer and wait for update flag is set
+	*/
+	
+	//1. Enable Timer Clock
+	RCC->APB2ENR |= RCC_APB2ENR_TIM9EN;
+	
+	//2. Set the prescalor and ARR
+//	TIM9->PSC |= 168-1; // 168MHz / (168-1+1) = 1MHz = 1us
+//	TIM9->ARR |= 0xffff; // MAX ARR value 
+	TIM9->PSC = 168-1; // 168MHz / (168-1+1) = 1MHz = 1us
+	TIM9->ARR = 0xffff; // MAX ARR value 
+	
+	//3. Enable the Timer and wait for update flag is set
+	TIM9->CR1 |= TIM_CR1_CEN;
+	while (!(TIM9->SR & (1<<0))); // UIF: update interrupt flag... This bit is set by hardware when the registers are updated
+}
+
+
+
+
+void Delay_us (uint16_t us)
+{
+	/*
+	1. Reset the counter
+	2. Wait for the counter to reach the entered value. As each count takes 1us
+	*/
+	//1. Reset the counter
+	TIM9->CNT = 0;
+
+	//2. Wait for the counter to reach the entered value. As each count takes 1us
+		while (TIM9->CNT < us);
+}
+
+void Delay_ms (uint16_t ms)
+{
+	for (uint16_t i =0; i < ms; i++)
+	{
+	Delay_us (1000);
+	}
+}
+
+
+void Transeiver_ports_Config (void) 
+{
+/*
+	1. Enable the GPIO CLOCK
+	2. Set the pin as output 
+	3. Configure the output mode
+	*/
+	
+	//1. Enable the GPIO CLOCK
+	RCC->AHB1ENR |=RCC_AHB1ENR_GPIODEN;
+	
+	//2. Set the pin as output
+	GPIOD->MODER |= GPIO_MODER_MODE12_0;
+	GPIOD->MODER |= GPIO_MODER_MODE13_0;
+	
+	//3. Configure the output mode 
+	GPIOD->OTYPER &= ~GPIO_OTYPER_OT12; // push pull PD12
+	GPIOD->OTYPER &= ~GPIO_OTYPER_OT13; // push pull PD13
+	
+	GPIOD->OSPEEDR |= GPIO_OSPEEDER_OSPEEDR12_0; // fast speed PD12 (high speed ???) 
+	GPIOD->OSPEEDR |= GPIO_OSPEEDER_OSPEEDR12_1;
+	
+	GPIOD->OSPEEDR |= GPIO_OSPEEDER_OSPEEDR13_0; // fast speed PD13 (high speed ???) 
+	GPIOD->OSPEEDR |= GPIO_OSPEEDER_OSPEEDR13_1;
+	
+}
+
+void TIM1Config (void) // for DMA
+{
+	RCC->APB2ENR |= RCC_APB2ENR_TIM1EN;
+	TIM1->PSC = 0;
+	TIM1->ARR = 84-1; 
+	TIM1->DIER |= TIM_DIER_UDE; // UE generates DMA request
+	//TIM1->CR1 |= TIM_CR1_CEN;
+}
+
+void TIM10Config (void) // for DMA
+{
+	RCC->APB2ENR |= RCC_APB2ENR_TIM10EN;
+	TIM10->PSC = 0;
+	TIM10->ARR = 84-1; 
+	TIM10->DIER |= TIM_DIER_UDE; 
+	
+}
+
+
+
+void DMA2Config (void)
+{
+	RCC->AHB1ENR |= RCC_AHB1ENR_DMA2EN;
+	DMA2_Stream5 -> CR |= DMA_SxCR_CHSEL_1|  // channal 6
+	DMA_SxCR_CHSEL_2|
+	DMA_SxCR_MSIZE|
+	DMA_SxCR_PSIZE|
+	DMA_SxCR_DIR_0|
+	DMA_SxCR_MINC|
+	DMA_SxCR_TCIE;
+	DMA2_Stream5->PAR = &GPIOD->BSRR;
+	DMA2_Stream5->M0AR = &DMA_BUFFER[0];
+	DMA2_Stream5->NDTR = 40;
+	NVIC_EnableIRQ (DMA2_Stream5_IRQn);
+	//DMA2_Stream5->CR |= DMA_SxCR_EN;
+
+}
+void Synchro(int command_or_data, int start_bit_in_buffer) // if command_or_data = 1 - commandword; if command_or_data = 0 - dataword
+{
+	start_bit_in_buffer = amount_of_bits_in_buffer;
+	if (command_or_data==1) // if command word
+	{
+		DMA_BUFFER[start_bit_in_buffer+0]= 	0x20001000;
+		DMA_BUFFER[start_bit_in_buffer+1]=  0x20001000;
+		DMA_BUFFER[start_bit_in_buffer+2]=  0x20001000;
+		DMA_BUFFER[start_bit_in_buffer+3]=  0x10002000;
+		DMA_BUFFER[start_bit_in_buffer+4]=  0x10002000;
+		DMA_BUFFER[start_bit_in_buffer+5]=  0x10002000;
+	}
+	else // if data word
+	{
+		DMA_BUFFER[start_bit_in_buffer+0]= 	0x10002000;
+		DMA_BUFFER[start_bit_in_buffer+1]=  0x10002000;
+		DMA_BUFFER[start_bit_in_buffer+2]=  0x10002000;
+		DMA_BUFFER[start_bit_in_buffer+3]=  0x20001000;
+		DMA_BUFFER[start_bit_in_buffer+4]=  0x20001000;
+		DMA_BUFFER[start_bit_in_buffer+5]=  0x20001000;
+	}
+	//amount_of_bits_in_buffer = amount_of_bits_in_buffer+6;
+}
+
+void CLEAR_DATA1_MASSIVE (void)
+{
+	for (int i=0; i<20; i++)
+	{
+		data1[i]=0;
+	}
+}
+
+void FILL_THE_BUFFER_DATAWORD (int data, int amount_of_words)
+{
+	int chet=0;
+	
+	CLEAR_DATA1_MASSIVE();
+	
+	Synchro(0,0); // Synchro
+	
+	for (int i=0;i<20;i++) 
+	{
+		if ((data & (1<<(15-i)))!=0) // if the bit is hight
+		{
+			chet=chet+1;
+			data1[i+3]=1;
+		}
+		else // if the bit is low
+		{
+			data1[i+3]=0;
+		}
+	}
+	
+	if(chet%2==0) 
+	{
+		data1[19]=1;
+	}
+	else
+	{
+		data1[19]=0;
+	}
+	
+	
+	for (int i=3;i<20;i++) 
+	{
+		if (data1[i]==1)
+		{
+				DMA_BUFFER[amount_of_bits_in_buffer+2*i]= 0x20001000;
+				DMA_BUFFER[amount_of_bits_in_buffer+2*i+1]= 0x10002000;
+		}
+		else
+		{
+			  DMA_BUFFER[amount_of_bits_in_buffer+2*i]= 0x10002000; 
+				DMA_BUFFER[amount_of_bits_in_buffer+2*i+1]= 0x20001000;
+		}
+	}
+	DMA_BUFFER[amount_of_bits_in_buffer+0]= 0x10002000;
+
+	
+	
+	for(int k=1; k<amount_of_words; k++)
+	{
+		for (i=0;i<40;i++)
+		{
+		DMA_BUFFER[amount_of_bits_in_buffer+i+k*40] = DMA_BUFFER[amount_of_bits_in_buffer+i];
+		}
+	}
+	
+	amount_of_bits_in_buffer = amount_of_bits_in_buffer + amount_of_words*40;
+	
+}
+
+
+
+void SendDataWord (int data, int amount_of_words)
+{
+	FILL_THE_BUFFER_DATAWORD(data, amount_of_words);
+	
+	//DMA2_Stream5->CR |= DMA_SxCR_EN;
+	//while (!(DMA2_Stream5->CR & DMA_SxCR_EN));
+	//TIM1->CR1 |= TIM_CR1_CEN;
+}
+
+ void FILL_THE_BUFFER_COMMANDWORD(int adress_OU, int priem_peredacha, int podadres, int cod_command, int amount_of_words)
+{
+	int chet=0;
+	CLEAR_DATA1_MASSIVE();
+	
+	Synchro(1,0);
+	
+	for (int i=0;i<5;i++) // adress_OU
+	{
+		if ((adress_OU & (1<<(4-i)))!=0) // if the bit is hight
+		{
+			chet=chet+1;
+			data1[i+3]=1;
+		}
+		else // if the bit is low
+		{
+			data1[i+3]=0;
+		}
+	}
+	
+	if (priem_peredacha==1) 
+	{
+		chet=chet+1;
+		data1[8]=1;
+	}
+	else
+	{
+		data1[8]=0;
+	}
+	
+	for (int i=0;i<5;i++)
+	{
+		if ((podadres & (1<<(4-i)))!=0) // if the bit is hight
+		{
+			chet=chet+1;
+			data1[i+9]=1;
+		}
+		else // if the bit is low
+		{
+			data1[i+9]=0;
+		}
+	}
+	
+	for (int i=0;i<5;i++) // cod command
+	{
+		if ((cod_command & (1<<(4-i)))!=0) // if the bit is hight
+		{
+			chet=chet+1;
+			data1[i+14]=1;
+		}
+		else // if the bit is low
+		{
+			data1[i+14]=0;
+		}
+	}
+	
+	if(chet%2==0) 
+	{
+		data1[19]=1;
+	}
+	else
+	{
+		data1[19]=0;
+	}
+	
+	for (int i=3;i<20;i++) 
+	{
+		if (data1[i]==1)
+		{
+				DMA_BUFFER[amount_of_bits_in_buffer+2*i]= 0x20001000;
+				DMA_BUFFER[amount_of_bits_in_buffer+2*i+1]= 0x10002000;
+		}
+		else
+		{
+			  DMA_BUFFER[amount_of_bits_in_buffer+2*i]= 0x10002000; 
+				DMA_BUFFER[amount_of_bits_in_buffer+2*i+1]= 0x20001000;
+		}
+	}
+	DMA_BUFFER[amount_of_bits_in_buffer+0]= 0x20001000;
+	
+	
+	for(int k=1; k<amount_of_words; k++)
+	{
+		for (i=0;i<40;i++)
+		{
+		DMA_BUFFER[amount_of_bits_in_buffer+i+k*40] = DMA_BUFFER[i];
+		}
+	}
+	
+	amount_of_bits_in_buffer = amount_of_bits_in_buffer + amount_of_words*40;
+	//DMA_BUFFER[amount_of_words*40] = 0x30000000;
+}
+
+void StartSend (void)
+{
+	DMA2_Stream5->NDTR = amount_of_bits_in_buffer;
+	DMA2_Stream5->CR |= DMA_SxCR_EN;
+	TIM1->CR1 |= TIM_CR1_CEN;
+}
+
+
+
+
+void SendCommandWord (int adress_OU, int oshibla_in_message, int podadres, int cod_command, int amount_of_words)
+{
+	FILL_THE_BUFFER_COMMANDWORD(adress_OU, oshibla_in_message, podadres, cod_command, amount_of_words);
+	//DMA2_Stream5->CR |= DMA_SxCR_EN;
+	//while (!(DMA2_Stream5->CR & DMA_SxCR_EN));
+	//TIM1->CR1 |= TIM_CR1_CEN;
+}
+
+
+void FILL_THE_BUFFER_DELAY (int time)
+{
+	
+	for (int i=0;i<time;i++)
+	{
+		DMA_BUFFER[amount_of_bits_in_buffer+i]=0x30000000;
+	}
+	amount_of_bits_in_buffer = amount_of_bits_in_buffer + time;
+}
+
+void SendDelay (int time )  // delay = 500ns * t 
+{
+	FILL_THE_BUFFER_DELAY(time);
+}
+
+
+void CLEAR_THE_DMABUFFER (void)
+{
+	for(i=0; i<200; i++)
+	{
+		DMA_BUFFER[i]=0;
+	}
+	
+}
+
+
+
+/*
+void StopSend (void)
+{
+
+	TIM1->CR1 &= ~TIM_CR1_CEN;
+	DMA2_Stream5->CR &= ~DMA_SxCR_EN;
+	GPIOD->BSRR |=0x30000000;
+	CLEAR_THE_DMABUFFER();
+	amount_of_bits_in_buffer = 0;
+}
+*/
+
+void Receiver_ports_Config (void)
+{
+	// PE7, PE9
+	/*
+	1. Enable the GPIO CLOCK
+	2. Set the pin as output 
+	3. Configure the output mode
+	*/
+	
+	//1. Enable the GPIO CLOCK
+	RCC->AHB1ENR |=RCC_AHB1ENR_GPIOEEN;
+	
+	//2. Set the pin as input
+	GPIOE->MODER &= ~GPIO_MODER_MODE7_0;
+	GPIOE->MODER &= ~GPIO_MODER_MODE7_1;
+	
+	GPIOE->MODER &= ~GPIO_MODER_MODE9_0;
+	GPIOE->MODER &= ~GPIO_MODER_MODE9_1;
+	
+}
+
+void EXTERNAL_INTERRUPT_CONFIG (void)
+{
+	RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+	SYSCFG->EXTICR[1] |= SYSCFG_EXTICR1_EXTI1_PE; // exti1 to pa 1 
+	EXTI->IMR |= EXTI_IMR_IM1; // 
+	EXTI->RTSR |= EXTI_RTSR_TR1; // enable rising trigger
+	EXTI->FTSR |= EXTI_FTSR_TR1; // enable rising trigger
+	
+//	NVIC_EnableIRQ(EXTI1_IRQn);
+}
+
+void DMA2_Stream5_IRQHandler (void)
+{
+	k++;
+	DMA2->HIFCR |= DMA_HIFCR_CTCIF5;
+	TIM1->CR1 &= ~TIM_CR1_CEN;
+	DMA2_Stream5->CR &= ~DMA_SxCR_EN;
+	GPIOD->BSRR |=0x30000000;
+	Delay_ms(100);
+
+
+	CLEAR_THE_DMABUFFER();
+	amount_of_bits_in_buffer = 0;
+	
+	SendCommandWord(adress_OU, priem_peredacha, podadres, cod_command, amount_of_words);
+	StartSend();
+	
+}
+
+
+int main ()
+{
+	SysClockConfig();
+	Transeiver_ports_Config();
+	TIM9Config(); // for delays in us/ms 
+	DMA2Config();
+	TIM1Config();
+	
+	SendCommandWord(adress_OU, priem_peredacha, podadres, cod_command, amount_of_words);
+	StartSend();
+	while (1)
+	{
+		
+	}		
+} 
